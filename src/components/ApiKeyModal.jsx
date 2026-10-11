@@ -1,7 +1,15 @@
 import React, { useState } from 'react';
 import { useDispatch, useSelector } from 'react-redux';
 import { setApiKey } from '../store/pantrySlice';
-import { Key, ExternalLink, CheckCircle, AlertCircle, X, ShieldCheck } from 'lucide-react';
+import { Key, ExternalLink, CheckCircle, AlertCircle, X } from 'lucide-react';
+
+const CANDIDATE_MODELS = [
+  'gemini-flash-latest',
+  'gemini-3-flash-preview',
+  'gemini-3.1-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-1.5-flash',
+];
 
 export default function ApiKeyModal({ isOpen, onClose }) {
   const dispatch = useDispatch();
@@ -31,29 +39,53 @@ export default function ApiKeyModal({ isOpen, onClose }) {
     }
 
     setTestStatus('testing');
-    setTestMessage('Pinging Gemini Flash...');
+    setTestMessage('Connecting to Gemini Flash...');
 
-    try {
-      const response = await fetch(`https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent?key=${keyValue.trim()}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          contents: [{ parts: [{ text: 'Respond with just one word: Culinary.' }] }],
-        }),
-      });
+    let lastError = null;
+    let connectedModel = null;
+    let replyText = '';
 
-      if (!response.ok) {
+    for (const model of CANDIDATE_MODELS) {
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${keyValue.trim()}`,
+          {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              contents: [{ parts: [{ text: 'Respond with one word: Culinary.' }] }],
+            }),
+          }
+        );
+
+        if (response.ok) {
+          const data = await response.json();
+          replyText = data?.candidates?.[0]?.content?.parts?.[0]?.text?.trim() || 'OK';
+          connectedModel = model;
+          break;
+        }
+
         const errorData = await response.json().catch(() => ({}));
-        throw new Error(errorData?.error?.message || `HTTP ${response.status}`);
-      }
+        if (response.status === 404) {
+          // Model not found in this region/tier, try next
+          continue;
+        }
 
-      const data = await response.json();
-      const reply = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        throw new Error(errorData?.error?.message || `HTTP ${response.status}`);
+      } catch (err) {
+        lastError = err;
+        if (err.message && !err.message.includes('404')) {
+          break;
+        }
+      }
+    }
+
+    if (connectedModel) {
       setTestStatus('success');
-      setTestMessage(`Connected successfully! Gemini replied: "${reply?.trim() || 'OK'}"`);
-    } catch (err) {
+      setTestMessage(`Connected to ${connectedModel}! Gemini replied: "${replyText}"`);
+    } else {
       setTestStatus('error');
-      setTestMessage(err.message || 'Connection failed. Verify your key.');
+      setTestMessage(lastError?.message || 'Connection failed. Verify your key.');
     }
   };
 
@@ -78,13 +110,13 @@ export default function ApiKeyModal({ isOpen, onClose }) {
         </div>
 
         <p className="text-sm text-slate-300 mb-4 leading-relaxed">
-          PantryLens uses Google Gemini 1.5/2.0 Flash for instant ingredient recognition and gourmet recipe generation. Your API key is stored locally in your browser.
+          PantryLens uses Google Gemini Flash for instant ingredient recognition and gourmet recipe generation. Your API key is stored locally in your browser.
         </p>
 
         <div className="space-y-4">
           <div>
             <label className="block text-xs font-semibold uppercase tracking-wider text-slate-400 mb-1.5">
-              API Key (AIzaSy...)
+              API Key
             </label>
             <input
               type="password"

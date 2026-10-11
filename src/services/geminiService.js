@@ -1,16 +1,22 @@
 /**
  * Gemini API Service for PantryLens
- * Designed for Gemini 1.5 Flash / 2.0 Flash (Free Tier Friendly)
+ * Designed for Gemini Flash (Free Tier Friendly with multi-model fallback)
  */
 
-const GEMINI_API_URL = 'https://generativelanguage.googleapis.com/v1beta/models/gemini-1.5-flash:generateContent';
+// Supported models in order of preference
+const CANDIDATE_MODELS = [
+  'gemini-flash-latest',
+  'gemini-3-flash-preview',
+  'gemini-3.1-flash-lite',
+  'gemini-2.5-flash',
+  'gemini-1.5-flash',
+];
 
 /**
  * Extracts pure JSON from a Gemini response that might contain markdown backticks
  */
 function cleanJsonText(rawText) {
   let cleaned = rawText.trim();
-  // Strip ```json or ``` at beginning and end
   if (cleaned.startsWith('```json')) {
     cleaned = cleaned.substring(7);
   } else if (cleaned.startsWith('```')) {
@@ -33,6 +39,60 @@ export function getCategoryIcon(category = '', name = '') {
   if (lower.includes('bread') || lower.includes('flour') || lower.includes('grain') || lower.includes('pasta') || lower.includes('rice') || lower.includes('sourdough')) return '🍞';
   if (lower.includes('oil') || lower.includes('vinegar') || lower.includes('spice') || lower.includes('sauce') || lower.includes('salt')) return '🫒';
   return '✨';
+}
+
+/**
+ * Core caller that tries candidate models in sequence
+ */
+async function executeGeminiRequest(apiKey, requestBody) {
+  let lastError = null;
+
+  for (const model of CANDIDATE_MODELS) {
+    try {
+      const url = `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`;
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(requestBody),
+      });
+
+      if (response.ok) {
+        const data = await response.json();
+        const textOutput = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (textOutput) {
+          return textOutput;
+        }
+      }
+
+      const errorData = await response.json().catch(() => ({}));
+      const message = errorData?.error?.message || `HTTP ${response.status}`;
+
+      if (response.status === 404) {
+        // Model not available in this tier/account, try next model in CANDIDATE_MODELS
+        lastError = new Error(`Model ${model} not available: ${message}`);
+        continue;
+      }
+
+      if (response.status === 429) {
+        throw new Error('Gemini Free Tier rate limit reached (15 req/min). Please wait 30 seconds.');
+      }
+
+      if (response.status === 400 || response.status === 403) {
+        throw new Error(`API Key error: ${message}`);
+      }
+
+      lastError = new Error(message);
+    } catch (err) {
+      if (err.message.includes('rate limit') || err.message.includes('API Key error')) {
+        throw err;
+      }
+      lastError = err;
+    }
+  }
+
+  throw lastError || new Error('Unable to connect to Gemini with available models.');
 }
 
 /**
@@ -125,37 +185,10 @@ RETURN ONLY VALID RAW JSON adhering to this exact schema (no preamble, no conver
     }
   };
 
-  const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
-    method: 'POST',
-    headers: {
-      'Content-Type': 'application/json',
-    },
-    body: JSON.stringify(requestBody),
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    const message = errorData?.error?.message || `HTTP ${response.status}: ${response.statusText}`;
-    if (response.status === 429) {
-      throw new Error('Gemini Free Tier rate limit reached (15 requests/min). Please wait 30 seconds before retrying.');
-    }
-    if (response.status === 400 || response.status === 403) {
-      throw new Error(`API Key error: ${message}. Check your key at Google AI Studio.`);
-    }
-    throw new Error(`Gemini API Error: ${message}`);
-  }
-
-  const data = await response.json();
-  const textOutput = data?.candidates?.[0]?.content?.parts?.[0]?.text;
-
-  if (!textOutput) {
-    throw new Error('No response text received from Gemini.');
-  }
-
+  const textOutput = await executeGeminiRequest(apiKey, requestBody);
   const cleanJson = cleanJsonText(textOutput);
   try {
-    const parsed = JSON.parse(cleanJson);
-    return parsed;
+    return JSON.parse(cleanJson);
   } catch (err) {
     console.error('Failed to parse Gemini JSON:', cleanJson);
     throw new Error('Failed to parse culinary response into structured data. Please try again.');
@@ -236,23 +269,7 @@ RETURN ONLY VALID RAW JSON adhering to this exact schema (no markdown formatting
     }
   };
 
-  const response = await fetch(`${GEMINI_API_URL}?key=${apiKey}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(requestBody),
-  });
-
-  if (!response.ok) {
-    const errorData = await response.json().catch(() => ({}));
-    const message = errorData?.error?.message || `HTTP ${response.status}: ${response.statusText}`;
-    if (response.status === 429) {
-      throw new Error('Gemini Free Tier rate limit reached (15 requests/min). Please wait 30 seconds.');
-    }
-    throw new Error(`Gemini API Error: ${message}`);
-  }
-
-  const data = await response.json();
-  const textOutput = data?.candidates?.[0]?.content?.parts?.[0]?.text;
+  const textOutput = await executeGeminiRequest(apiKey, requestBody);
   const cleanJson = cleanJsonText(textOutput);
   return JSON.parse(cleanJson);
 }
